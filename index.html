@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#111827">
+<link rel="manifest" href="manifest.json">
+<title>Inventory App</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<style>
+*{box-sizing:border-box}body{margin:0;font-family:system-ui,-apple-system,Segoe UI,sans-serif;background:#0b1220;color:#f8fafc}
+header{position:sticky;top:0;z-index:5;background:#111827;border-bottom:1px solid #263244;padding:14px 16px}
+h1{font-size:22px;margin:0}.sub{color:#94a3b8;font-size:12px;margin-top:2px}
+main{max-width:720px;margin:auto;padding:16px 16px 90px}.tabs{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:14px}
+button,.btn{border:0;border-radius:12px;padding:13px 14px;font-weight:700;font-size:15px;background:#243044;color:white}
+button.primary{background:#2563eb}button.in{background:#15803d}button.out{background:#b91c1c}
+button.active{outline:2px solid #60a5fa;background:#334155}
+.card{background:#111827;border:1px solid #263244;border-radius:16px;padding:16px;margin-bottom:14px}
+label{display:block;color:#cbd5e1;font-size:13px;margin:10px 0 6px}
+input,select,textarea{width:100%;background:#0f172a;color:white;border:1px solid #334155;border-radius:10px;padding:12px;font-size:16px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.full{grid-column:1/-1}
+.item{display:flex;justify-content:space-between;gap:12px;align-items:center;border-bottom:1px solid #263244;padding:12px 0}.item:last-child{border-bottom:0}
+.qty{font-size:20px;font-weight:800}.muted{color:#94a3b8;font-size:13px}.danger{color:#fca5a5}.good{color:#86efac}
+.hidden{display:none!important}.status{padding:10px;border-radius:10px;background:#172033;color:#cbd5e1;margin-top:10px}
+#reader{width:100%;overflow:hidden;border-radius:12px}.scanbox{margin-top:10px}
+.actions{display:grid;grid-template-columns:1fr 1fr;gap:10px}.actions button:last-child{grid-column:1/-1}
+.small{font-size:12px;color:#94a3b8}
+</style>
+</head>
+<body>
+<header><h1>Inventory App</h1><div class="sub">Cloud inventory • Supabase</div></header>
+<main>
+<div class="tabs">
+<button id="tabInv" class="active" onclick="showTab('inventory')">Inventory</button>
+<button id="tabScan" onclick="showTab('scan')">Scan / Move</button>
+<button id="tabAdd" onclick="showTab('add')">Add Item</button>
+</div>
+
+<section id="inventory">
+<div class="card">
+<label>Search inventory</label>
+<input id="search" placeholder="Part number, description, brand..." oninput="renderInventory()">
+<div id="inventoryList" class="small">Loading...</div>
+</div>
+<div class="card">
+<button class="primary" onclick="exportCSV()">Export Inventory CSV for Excel</button>
+<div class="small" style="margin-top:8px">The cloud database is the master inventory. Exported CSV files open in Excel.</div>
+</div>
+</section>
+
+<section id="scan" class="hidden">
+<div class="card">
+<label>Employee name</label><input id="employee" placeholder="Who is taking/adding the item?">
+<label>Barcode / part number</label>
+<input id="barcode" placeholder="Scan or type part number">
+<div class="actions" style="margin-top:10px">
+<button class="primary" onclick="startScanner()">📷 Scan with camera</button>
+<button onclick="stopScanner()">Stop scanner</button>
+</div>
+<div id="reader" class="scanbox hidden"></div>
+<label>Quantity</label><input id="moveQty" type="number" min="1" value="1">
+<label>Transaction</label>
+<div class="actions">
+<button class="in" onclick="moveStock('IN')">➕ Stock IN</button>
+<button class="out" onclick="moveStock('OUT')">➖ Stock OUT</button>
+</div>
+<div id="scanStatus" class="status">Scan an item, enter quantity, then choose IN or OUT.</div>
+</div>
+</section>
+
+<section id="add" class="hidden">
+<div class="card">
+<div class="grid">
+<div><label>Part number / barcode</label><input id="newPart"></div>
+<div><label>Quantity</label><input id="newQty" type="number" min="0" value="0"></div>
+<div class="full"><label>Description</label><input id="newDesc"></div>
+<div><label>Manufacturer / brand</label><input id="newMan"></div>
+<div><label>Location</label><input id="newLoc" placeholder="Shelf / room"></div>
+<div><label>Minimum stock</label><input id="newMin" type="number" min="0" value="0"></div>
+<div class="full"><label>Notes</label><textarea id="newNotes" rows="3"></textarea></div>
+</div>
+<button class="primary" style="width:100%;margin-top:14px" onclick="addItem()">Save Item</button>
+<div id="addStatus" class="status"></div>
+</div>
+</section>
+</main>
+
+<script>
+const SUPABASE_URL = "https://kiiikunxowweixqfksok.supabase.co";
+const SUPABASE_KEY = "sb_publishable_OlGFYppM92OPA4DX-UnR8A_loXX5sF6";
+const db = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+let items=[], scanner=null;
+
+function showTab(t){
+  ['inventory','scan','add'].forEach(x=>document.getElementById(x).classList.toggle('hidden',x!==t));
+  document.getElementById('tabInv').classList.toggle('active',t==='inventory');
+  document.getElementById('tabScan').classList.toggle('active',t==='scan');
+  document.getElementById('tabAdd').classList.toggle('active',t==='add');
+  if(t==='inventory') loadItems();
+}
+async function loadItems(){
+  const {data,error}=await db.from('inventory_items').select('*').order('description');
+  if(error){document.getElementById('inventoryList').textContent='Database error: '+error.message;return}
+  items=data||[]; renderInventory();
+}
+function renderInventory(){
+  const q=(document.getElementById('search').value||'').toLowerCase();
+  const list=items.filter(x=>[x.part_number,x.description,x.manufacturer,x.location].some(v=>(v||'').toLowerCase().includes(q)));
+  document.getElementById('inventoryList').innerHTML=list.length?list.map(x=>{
+    const low=x.quantity<=x.minimum_stock;
+    return `<div class="item"><div><b>${esc(x.description)}</b><div class="muted">${esc(x.part_number)}${x.manufacturer?' • '+esc(x.manufacturer):''}${x.location?' • '+esc(x.location):''}</div>${low?'<div class="danger">LOW STOCK</div>':''}</div><div class="qty ${low?'danger':'good'}">${x.quantity}</div></div>`;
+  }).join(''):'<p class="muted">No inventory items found.</p>';
+}
+async function addItem(){
+  const part=document.getElementById('newPart').value.trim(), desc=document.getElementById('newDesc').value.trim();
+  if(!part||!desc){document.getElementById('addStatus').textContent='Part number and description are required.';return}
+  const payload={part_number:part,description:desc,quantity:Number(newQty.value)||0,minimum_stock:Number(newMin.value)||0,location:newLoc.value.trim()||null,manufacturer:newMan.value.trim()||null,notes:newNotes.value.trim()||null};
+  const {error}=await db.from('inventory_items').insert(payload);
+  document.getElementById('addStatus').textContent=error?'Error: '+error.message:'Item saved!';
+  if(!error){['newPart','newDesc','newMan','newLoc','newNotes'].forEach(id=>document.getElementById(id).value='');newQty.value=0;newMin.value=0;loadItems();}
+}
+async function findItem(code){
+  const {data,error}=await db.from('inventory_items').select('*').eq('part_number',code.trim()).maybeSingle();
+  if(error) throw error; return data;
+}
+async function moveStock(type){
+  const code=document.getElementById('barcode').value.trim(), qty=Number(document.getElementById('moveQty').value), employee=document.getElementById('employee').value.trim()||null;
+  const status=document.getElementById('scanStatus');
+  if(!code||!qty||qty<1){status.textContent='Enter or scan a part number and quantity.';return}
+  try{
+    const item=await findItem(code);
+    if(!item){status.textContent='Item not found. Add it first in Add Item.';return}
+    if(type==='OUT' && item.quantity<qty){status.textContent=`Not enough stock. Current quantity: ${item.quantity}`;return}
+    const newQty=type==='IN'?item.quantity+qty:item.quantity-qty;
+    const {error:e1}=await db.from('inventory_items').update({quantity:newQty,updated_at:new Date().toISOString()}).eq('id',item.id);
+    if(e1) throw e1;
+    const {error:e2}=await db.from('inventory_transactions').insert({item_id:item.id,change_quantity:qty,transaction_type:type,employee_name:employee,notes:null});
+    if(e2) throw e2;
+    status.textContent=`${type==='IN'?'Added':'Removed'} ${qty} • ${item.description} • New stock: ${newQty}`;
+    await loadItems();
+  }catch(e){status.textContent='Error: '+e.message}
+}
+async function startScanner(){
+  const status=document.getElementById('scanStatus');
+  const reader=document.getElementById('reader');
+  reader.classList.remove('hidden');
+  if(scanner)return;
+
+  if(!window.isSecureContext){
+    status.textContent='Camera needs a secure HTTPS website. Open the online Inventory App link, not the HTML file.';
+    return;
+  }
+  if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+    status.textContent='This browser does not support camera access. Try Chrome on your phone.';
+    return;
+  }
+
+  scanner=new Html5Qrcode('reader');
+  try{
+    let cameraConfig={facingMode:{exact:'environment'}};
+    try{
+      const cameras=await Html5Qrcode.getCameras();
+      if(cameras && cameras.length){
+        const rear=cameras.find(c=>/back|rear|environment/i.test(c.label)) || cameras[cameras.length-1];
+        cameraConfig={deviceId:{exact:rear.id}};
+      }
+    }catch(cameraListError){}
+
+    await scanner.start(cameraConfig,{fps:12,qrbox:{width:280,height:160}},code=>{
+      document.getElementById('barcode').value=code.trim();
+      status.textContent='Scanned: '+code+' — enter quantity and choose IN or OUT.';
+      stopScanner();
+    },()=>{});
+    status.textContent='Camera is on. Point it at the barcode.';
+  }catch(e){
+    console.error(e);
+    try{await scanner.clear();}catch(ignore){}
+    scanner=null;
+    reader.classList.add('hidden');
+    status.textContent='Camera could not start. Allow camera permission in Chrome, then try again.';
+  }
+}
+async function stopScanner(){
+  if(scanner){try{await scanner.stop();}catch(e){}try{scanner.clear();}catch(e){}scanner=null}
+  document.getElementById('reader').classList.add('hidden');
+}
+function exportCSV(){
+  const rows=[['Part Number','Description','Quantity','Minimum Stock','Location','Manufacturer','Notes'],...items.map(x=>[x.part_number,x.description,x.quantity,x.minimum_stock,x.location||'',x.manufacturer||'',x.notes||''])];
+  const csv=rows.map(r=>r.map(v=>`"${String(v).replaceAll('"','""')}"`).join(',')).join('\n');
+  const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));a.download='inventory.csv';a.click();
+}
+function esc(v){return String(v??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]))}
+loadItems();
+</script>
+</body></html>
