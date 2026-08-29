@@ -26,10 +26,29 @@ input,select,textarea{width:100%;background:#0f172a;color:white;border:1px solid
 #reader{width:100%;overflow:hidden;border-radius:12px}.scanbox{margin-top:10px}
 .actions{display:grid;grid-template-columns:1fr 1fr;gap:10px}.actions button:last-child{grid-column:1/-1}
 .small{font-size:12px;color:#94a3b8}
+.auth-screen{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px;background:#0b1220}.auth-card{width:100%;max-width:430px;background:#111827;border:1px solid #263244;border-radius:18px;padding:22px}.auth-card h2{margin:0 0 6px}.auth-card p{margin:0 0 18px;color:#94a3b8}.auth-actions{display:grid;gap:10px;margin-top:14px}.auth-link{background:transparent;padding:8px;color:#93c5fd;font-weight:600}.topbar{display:flex;justify-content:space-between;align-items:center;gap:10px}.logout{padding:8px 10px;font-size:13px;background:#334155}
 </style>
 </head>
 <body>
-<header><h1>Inventory App</h1><div class="sub">Cloud inventory • Supabase</div></header>
+<section id="authScreen" class="auth-screen">
+  <div class="auth-card">
+    <h2>Inventory App</h2>
+    <p id="authSubtitle">Sign in to access the shared inventory.</p>
+    <label>Email / Login</label>
+    <input id="authEmail" type="email" autocomplete="username" placeholder="employee@example.com">
+    <label>Password</label>
+    <input id="authPassword" type="password" autocomplete="current-password" placeholder="Password">
+    <div class="auth-actions">
+      <button class="primary" onclick="signIn()">Sign In</button>
+      <button onclick="signUp()">Create Account</button>
+      <button class="auth-link" onclick="resetPassword()">Forgot password?</button>
+    </div>
+    <div id="authStatus" class="status">Use your employee email and password.</div>
+  </div>
+</section>
+
+<div id="appShell" class="hidden">
+<header><div class="topbar"><div><h1>Inventory App</h1><div class="sub">Inventory App</div></div><button class="logout" onclick="signOut()">Sign Out</button></div></header>
 <main>
 <div class="tabs">
 <button id="tabInv" class="active" onclick="showTab('inventory')">Inventory</button>
@@ -80,17 +99,69 @@ input,select,textarea{width:100%;background:#0f172a;color:white;border:1px solid
 <div><label>Minimum stock</label><input id="newMin" type="number" min="0" value="0"></div>
 <div class="full"><label>Notes</label><textarea id="newNotes" rows="3"></textarea></div>
 </div>
+<div class="actions" style="margin-top:14px">
+<button class="primary" onclick="startAddScanner()">📷 Scan barcode with camera</button>
+<button onclick="stopAddScanner()">Stop scanner</button>
+</div>
+<div id="addReader" class="scanbox hidden"></div>
 <button class="primary" style="width:100%;margin-top:14px" onclick="addItem()">Save Item</button>
-<div id="addStatus" class="status"></div>
+<div id="addStatus" class="status">Scan a barcode above or enter the part number manually.</div>
 </div>
 </section>
 </main>
+</div>
 
 <script>
 const SUPABASE_URL = "https://kiiikunxowweixqfksok.supabase.co";
 const SUPABASE_KEY = "sb_publishable_OlGFYppM92OPA4DX-UnR8A_loXX5sF6";
 const db = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 let items=[], scanner=null;
+
+async function initAuth(){
+  const {data:{session}}=await db.auth.getSession();
+  updateAuthUI(session);
+  db.auth.onAuthStateChange((_event,session)=>updateAuthUI(session));
+  db.auth.onAuthStateChange(async (event)=>{if(event==='PASSWORD_RECOVERY'){const p=prompt('Enter a new password (6+ characters):');if(p){const {error}=await db.auth.updateUser({password:p});alert(error?'Password update failed: '+error.message:'Password updated.');}}});
+}
+function updateAuthUI(session){
+  document.getElementById('authScreen').classList.toggle('hidden',!!session);
+  document.getElementById('appShell').classList.toggle('hidden',!session);
+  if(session){
+    const email=session.user?.email||'';
+    const employee=document.getElementById('employee');
+    if(employee && !employee.value) employee.value=email;
+    loadItems();
+  }
+}
+async function signIn(){
+  const email=document.getElementById('authEmail').value.trim();
+  const password=document.getElementById('authPassword').value;
+  const status=document.getElementById('authStatus');
+  if(!email||!password){status.textContent='Enter your email and password.';return}
+  status.textContent='Signing in...';
+  const {error}=await db.auth.signInWithPassword({email,password});
+  status.textContent=error?'Sign in failed: '+error.message:'Signed in!';
+}
+async function signUp(){
+  const email=document.getElementById('authEmail').value.trim();
+  const password=document.getElementById('authPassword').value;
+  const status=document.getElementById('authStatus');
+  if(!email||!password){status.textContent='Enter an email and password.';return}
+  if(password.length<6){status.textContent='Password must be at least 6 characters.';return}
+  status.textContent='Creating account...';
+  const {data,error}=await db.auth.signUp({email,password,options:{emailRedirectTo:window.location.origin+window.location.pathname}});
+  if(error){status.textContent='Account creation failed: '+error.message;return}
+  status.textContent=data.session?'Account created and signed in!':'Account created. Check your email to confirm, then sign in.';
+}
+async function resetPassword(){
+  const email=document.getElementById('authEmail').value.trim();
+  const status=document.getElementById('authStatus');
+  if(!email){status.textContent='Enter your email first, then tap Forgot password.';return}
+  status.textContent='Sending reset email...';
+  const {error}=await db.auth.resetPasswordForEmail(email,{redirectTo:window.location.origin+window.location.pathname});
+  status.textContent=error?'Reset failed: '+error.message:'Check your email for a password reset link.';
+}
+async function signOut(){await db.auth.signOut();}
 
 function showTab(t){
   ['inventory','scan','add'].forEach(x=>document.getElementById(x).classList.toggle('hidden',x!==t));
@@ -142,34 +213,47 @@ async function moveStock(type){
   }catch(e){status.textContent='Error: '+e.message}
 }
 async function startScanner(){
-  const status=document.getElementById('scanStatus');
-  const reader=document.getElementById('reader');
+  await startScannerFor('barcode','scanStatus','reader');
+}
+async function startAddScanner(){
+  await startScannerFor('newPart','addStatus','addReader');
+}
+async function startScannerFor(targetId,statusId,readerId){
+  const status=document.getElementById(statusId);
+  const reader=document.getElementById(readerId);
   reader.classList.remove('hidden');
   if(scanner)return;
 
   if(!window.isSecureContext){
     status.textContent='Camera needs a secure HTTPS website. Open the online Inventory App link, not the HTML file.';
+    reader.classList.add('hidden');
     return;
   }
   if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
     status.textContent='This browser does not support camera access. Try Chrome on your phone.';
+    reader.classList.add('hidden');
+    return;
+  }
+  if(typeof Html5Qrcode==='undefined'){
+    status.textContent='Scanner library did not load. Check your internet connection and try again.';
+    reader.classList.add('hidden');
     return;
   }
 
-  scanner=new Html5Qrcode('reader');
+  scanner=new Html5Qrcode(readerId);
   try{
-    let cameraConfig={facingMode:{exact:'environment'}};
+    let cameraConfig={facingMode:{ideal:'environment'}};
     try{
       const cameras=await Html5Qrcode.getCameras();
       if(cameras && cameras.length){
-        const rear=cameras.find(c=>/back|rear|environment/i.test(c.label)) || cameras[cameras.length-1];
-        cameraConfig={deviceId:{exact:rear.id}};
+        const rear=cameras.find(c=>/back|rear|environment/i.test(c.label));
+        cameraConfig={deviceId:{exact:(rear||cameras[0]).id}};
       }
     }catch(cameraListError){}
 
     await scanner.start(cameraConfig,{fps:12,qrbox:{width:280,height:160}},code=>{
-      document.getElementById('barcode').value=code.trim();
-      status.textContent='Scanned: '+code+' — enter quantity and choose IN or OUT.';
+      document.getElementById(targetId).value=code.trim();
+      status.textContent='Scanned: '+code.trim();
       stopScanner();
     },()=>{});
     status.textContent='Camera is on. Point it at the barcode.';
@@ -182,15 +266,18 @@ async function startScanner(){
   }
 }
 async function stopScanner(){
-  if(scanner){try{await scanner.stop();}catch(e){}try{scanner.clear();}catch(e){}scanner=null}
+  if(scanner){try{await scanner.stop();}catch(e){}try{await scanner.clear();}catch(e){}scanner=null}
   document.getElementById('reader').classList.add('hidden');
+  document.getElementById('addReader').classList.add('hidden');
 }
+function stopAddScanner(){ stopScanner(); }
+
 function exportCSV(){
   const rows=[['Part Number','Description','Quantity','Minimum Stock','Location','Manufacturer','Notes'],...items.map(x=>[x.part_number,x.description,x.quantity,x.minimum_stock,x.location||'',x.manufacturer||'',x.notes||''])];
   const csv=rows.map(r=>r.map(v=>`"${String(v).replaceAll('"','""')}"`).join(',')).join('\n');
   const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));a.download='inventory.csv';a.click();
 }
 function esc(v){return String(v??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]))}
-loadItems();
+initAuth();
 </script>
 </body></html>
